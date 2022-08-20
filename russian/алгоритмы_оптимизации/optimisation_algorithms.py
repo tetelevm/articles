@@ -230,8 +230,6 @@ class GreedyAlgorithm(AlgorithmAbstract):
     So if there is no change in a step, the algorithm stops.
     """
 
-    without_changes: int
-
     def __init__(self, point_number=100):
         super().__init__(point_number)
         self.counter = 0
@@ -330,7 +328,6 @@ class GeneticAlgorithm(AlgorithmAbstract):
     child_count: int
     count_best: int
     population: list[Path]
-    without_changes: int
 
     def __init__(self, point_number=100):
         super().__init__(point_number)
@@ -344,22 +341,12 @@ class GeneticAlgorithm(AlgorithmAbstract):
 
     @staticmethod
     def create_descendants(parent_path: Path, count: int) -> list[Path]:
+        """
+        Copies the path several times.
+        """
         return [parent_path.copy() for _ in range(count)]
 
-    def filter_best_paths(self):
-        paths = sorted(self.population + [self.path], key=attrgetter("length"))
-        best_paths = paths[:self.count_best]
-        if self.path.length > best_paths[0].length:
-            self.without_changes = 0
-        self.path = best_paths[0]
-
-        new_population = []
-        for path in best_paths:
-            child = self.create_descendants(path, self.child_count)
-            new_population.extend(child)
-        self.population = new_population
-
-    def grow_generation(self):
+    def mutates_generation(self):
         # how to crossbreed paths, I have not figured out, so only mutations
         for path in self.population:
             if random.random() > 0.4:
@@ -367,7 +354,33 @@ class GeneticAlgorithm(AlgorithmAbstract):
             if random.random() > 0.4:
                 path.move_point()
 
-        self.filter_best_paths()
+    def filter_best_paths(self) -> list[Path]:
+        paths = sorted(self.population + [self.path], key=attrgetter("length"))
+        best_paths = paths[:self.count_best]
+
+        if self.path.length > best_paths[0].length:
+            self.without_changes = 0
+        self.path = best_paths[0]
+
+        return best_paths
+
+    def reproduce_children(self, best_paths: list[Path]):
+        new_population = []
+        for path in best_paths:
+            child = self.create_descendants(path, self.child_count)
+            new_population.extend(child)
+
+        self.population = new_population
+
+    def grow_generation(self):
+        """
+        Mutates the current generation, filters out the bad variants and
+        brings the population size back.
+        """
+
+        self.mutates_generation()
+        best_paths = self.filter_best_paths()
+        self.reproduce_children(best_paths)
 
     def do_one_step(self):
         self.without_changes += 1
@@ -379,9 +392,31 @@ class GeneticAlgorithm(AlgorithmAbstract):
 
 
 class AntColony(AlgorithmAbstract):
+    """
+    Creates many ants that walk the map and leave pheromones, and builds
+    a better path.
+    It has many parameters to configure (number of ants, evaporation
+    rate), so you can't make a simple algorithm that works for all
+    options.
+    """
+
+    ant_count: int
+    evaporation_coefficient: float
+    threshold: float
+
+    ants: list[Ant]
     line_pheromones: dict[tuple[int, int], float]
 
     class Ant:
+        """
+        The ant class, which is an independent unit.
+        As it travels along the path, it chooses points depending on the
+        pheromone map. The greater the pheromone path, the greater the
+        chance that the ant will follow that path.
+        Also, the ant remembers its path so that the pheromones are then
+        set along that path.
+        """
+
         order: list[int]
         not_visited: list[int]
 
@@ -391,9 +426,15 @@ class AntColony(AlgorithmAbstract):
             self.order = list(range(self.colony.point_number))
 
         def choose_point(self) -> int:
+            """
+            Selects the next point to visit.
+            To do this, it looks at the pheromones from the current
+            point to the unvisited points and makes a selection based
+            on them.
+            """
+
             from_point = self.order[-1]
             weights = [
-                # self.colony.line_pheromones[(from_point, to_point)]
                 self.colony.get_weight(from_point, to_point)
                 for to_point in self.not_visited
             ]
@@ -401,6 +442,10 @@ class AntColony(AlgorithmAbstract):
             return random.choices(point_indexes, weights=weights, k=1)[0]
 
         def hit_road(self) -> Path:
+            """
+            Builds a path that the ant chooses to follow, for which it
+            chooses points in turn, depending on the pheromone power.
+            """
             self.not_visited = self.order
             self.order = []
             self.order.append(self.not_visited.pop(-1))
@@ -420,21 +465,32 @@ class AntColony(AlgorithmAbstract):
         self.scout_number = 0
         self.scout_count = point_number * 5
 
-        self.ant_count = point_number * 3
+        self.ant_count = point_number * 5
         self.evaporation_coefficient = min(0.7, 1/log(log(point_number**1.3)))
         self.threshold = 1 / point_number ** 1.7
 
+        self.ants = [self.Ant(self) for _ in range(self.ant_count)]
         self.line_pheromones = {
             (fr, to): 1
             for fr in range(point_number)
             for to in range(fr + 1, point_number)
         }
-        self.ants = [self.Ant(self) for _ in range(self.ant_count)]
 
     def get_weight(self, fr, to) -> float:
+        """
+        Returns pheromones between the two points. The implausibility is
+        that values are only stored 1->2, so in the case of 2->1 there
+        will be no value.
+        """
         return self.line_pheromones[(fr, to) if fr < to else (to, fr)]
 
     def update_pheromones(self, paths: list[Path]):
+        """
+        Updates the pheromone map. First decreases the value for all
+        (taking into account the treshold), and then sets it for the
+        ones the ants were walking on.
+        """
+
         for key in self.line_pheromones.keys():
             if self.line_pheromones[key] > self.threshold:
                 self.line_pheromones[key] *= self.evaporation_coefficient
@@ -453,6 +509,10 @@ class AntColony(AlgorithmAbstract):
                 self.line_pheromones[(fr, to) if fr < to else (to, fr)] += weight
 
     def filter_paths(self, paths: list[Path]) -> list[Path]:
+        """
+        Filters paths, leaving only the more profitable and unique ones.
+        """
+
         unique_paths = [self.path]
         for new_path in paths:
             if new_path.length >= self.path.length:
@@ -467,6 +527,11 @@ class AntColony(AlgorithmAbstract):
         return sorted_paths
 
     def scout_area(self):
+        """
+        Launches ants to travel through the location, then filters the
+        paths and updates the pheromone map.
+        """
+
         paths = [ant.hit_road() for ant in self.ants]
         sorted_paths = self.filter_paths(paths)
 
@@ -485,8 +550,8 @@ class AntColony(AlgorithmAbstract):
 def main():
     # algorithm = GreedyAlgorithm
     # algorithm = SimulatedAnnealing
-    algorithm = GeneticAlgorithm
-    # algorithm = AntColony
+    # algorithm = GeneticAlgorithm
+    algorithm = AntColony
 
     algorithm_instance = algorithm(100)
     tester = Runner(algorithm_instance)
